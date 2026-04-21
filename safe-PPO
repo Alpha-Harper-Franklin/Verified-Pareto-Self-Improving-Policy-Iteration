@@ -550,9 +550,9 @@ def _snapshot_run_code(outdir: Path) -> None:
         _mkdir(snap)
         code_dir = Path(__file__).resolve().parent
         for name in [
-            'train_ppo_dcdc.py',
-            'train_sft_dcdc.py',
-            'train_dpo_dcdc.py',
+            Path(__file__).name,
+            'sft',
+            'DPO',
             'inc_parser.py',
             'dcdc_eval_tran.py',
             'dcdc_spice_builder.py',

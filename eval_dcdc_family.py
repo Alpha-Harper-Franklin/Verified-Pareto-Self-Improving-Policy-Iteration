@@ -10,8 +10,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import torch
-from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from dcdc_eval_tran import eval_one_detail_dcdc
 from dcdc_taskset import default_taskset
@@ -77,6 +75,9 @@ def build_prompt(family: str, vin: float, vout: float) -> str:
 
 
 def load_model(base_model: str, adapter: Optional[str]) -> tuple[Any, Any]:
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
     tok = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True, use_fast=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token

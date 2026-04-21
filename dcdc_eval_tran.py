@@ -138,7 +138,6 @@ def eval_one_detail_dcdc(
     t_pre: float,
     t_win: float,
     sim_timeout_s: float = 180.0,
-    autotune_duty: bool = False,
 ):
     ver = verify_inc_dcdc(inc, family=family, vin=vin, vout=vout)
     pass_C = bool(ver.ok)
@@ -256,68 +255,12 @@ def eval_one_detail_dcdc(
     if not out0.get("ok"):
         return out0
 
-    if out0.get("pass_CV", False):
-        out0["tuned"] = False
-        out0["tune_iters"] = 0
-        return out0
-
-    if not bool(autotune_duty):
-        out0["tuned"] = False
-        out0["tune_iters"] = 0
-        return out0
-
-    # Lightweight duty auto-tune: one feedback update if voltage tracking fails.
-    fam = (family or "").strip().lower()
-    vavg0 = float(out0.get("vavg", 0.0) or 0.0)
-    if not (vavg0 > 1e-9):
-        out0["tuned"] = False
-        out0["tune_iters"] = 0
-        return out0
-
-    def _clamp(v: float, lo: float, hi: float) -> float:
-        return max(lo, min(hi, float(v)))
-
-    duty_map0 = out0.get("duty_map") or {}
-    duty0 = float(duty_map0.get("gate", 0.5))
-    duty1 = float(duty_map0.get("gate1", 0.5))
-    duty2 = float(duty_map0.get("gate2", 0.5))
-
-    duty_override = None
-    duty1_override = None
-    duty2_override = None
-
-    if fam == "buck":
-        duty_override = _clamp(duty0 * (float(vout) / vavg0), 0.05, 0.95)
-    elif fam == "boost":
-        duty_override = _clamp(1.0 - (1.0 - duty0) * (vavg0 / max(1e-9, float(vout))), 0.05, 0.95)
-    elif fam == "sepic":
-        k0 = duty0 / max(1e-9, (1.0 - duty0))
-        k1 = k0 * (float(vout) / vavg0)
-        duty_override = _clamp(k1 / (1.0 + k1), 0.05, 0.95)
-    elif fam in {"buckboost", "buck-boost", "bb"}:
-        # Cascaded buck->boost: vout ≈ vin * duty1 / (1-duty2). Adjust both gates softly.
-        ratio = float(vout) / max(1e-9, float(vavg0))
-        ratio_s = ratio ** 0.5
-        duty1_override = _clamp(duty1 * ratio_s, 0.05, 0.95)
-        duty2_override = _clamp(1.0 - (1.0 - duty2) / max(1e-6, ratio_s), 0.05, 0.95)
-    else:
-        out0["tuned"] = False
-        out0["tune_iters"] = 0
-        return out0
-
-    out1 = _simulate_once(duty_override=duty_override, duty1_override=duty1_override, duty2_override=duty2_override)
-    if not out1.get("ok"):
-        out0["tuned"] = False
-        out0["tune_iters"] = 0
-        return out0
-
-    err0 = abs(float(out0.get("vavg", 0.0) or 0.0) - float(vout)) / max(1e-9, float(vout))
-    err1 = abs(float(out1.get("vavg", 0.0) or 0.0) - float(vout)) / max(1e-9, float(vout))
-
-    best = out1 if (out1.get("pass_CV", False) or err1 < err0) else out0
-    best["tuned"] = True
-    best["tune_iters"] = 1
-    return best
+    # Public release: do not apply post-hoc duty micro-tuning during evaluation.
+    # Keep the argument for backward compatibility, but always use the direct
+    # simulation result from the generated circuit.
+    out0["tuned"] = False
+    out0["tune_iters"] = 0
+    return out0
 
 
 def eval_one_detail_dcdc_robust(
@@ -335,7 +278,6 @@ def eval_one_detail_dcdc_robust(
     agg: str = "cvar",
     cvar_alpha: float = 0.25,
     tol_ref: float = 0.1,
-    autotune_duty: bool = False,
 ) -> dict:
     """
     Robust evaluation over a small operating-condition set.
@@ -366,7 +308,6 @@ def eval_one_detail_dcdc_robust(
                 rload=float(rl),
                 t_pre=float(t_pre),
                 t_win=float(t_win),
-                autotune_duty=bool(autotune_duty),
             )
             s = _score_detail(d, vout=float(vout), tol_ref=float(tol_ref))
             scenarios.append({"vin": float(vin_i), "rload": float(rl), "detail": d, "score": float(s)})

@@ -559,7 +559,6 @@ def _snapshot_run_code(outdir: Path) -> None:
             'dcdc_verifier.py',
             'dcdc_taskset.py',
             'eval_dcdc_family.py',
-            'dcdc_templates.py',
         ]:
             p = code_dir / name
             if p.exists():
@@ -749,7 +748,6 @@ def _guard_eval(
     t_pre: float,
     t_win: float,
     sim_timeout_s: float,
-    autotune_duty: bool,
     max_new_tokens: int,
     temperature: float,
     top_p: float,
@@ -822,7 +820,6 @@ def _guard_eval(
                     t_pre=float(t_pre),
                     t_win=float(t_win),
                     sim_timeout_s=float(sim_timeout_s),
-                    autotune_duty=bool(autotune_duty),
                 )
                 ok = bool(detail.get("ok", False))
                 cv_flags[i] = ok and bool(detail.get("pass_CV", False))
@@ -839,7 +836,6 @@ def _guard_eval(
                     t_pre=float(t_pre),
                     t_win=float(t_win),
                     sim_timeout_s=float(sim_timeout_s),
-                    autotune_duty=bool(autotune_duty),
                 )
                 fut_to_i[fut] = int(i)
 
@@ -1636,7 +1632,6 @@ def main() -> None:
     ap.add_argument("--t_pre", type=float, default=0.008)
     ap.add_argument("--t_win", type=float, default=0.002)
     ap.add_argument("--sim_timeout_s", type=float, default=180.0)
-    ap.add_argument("--autotune_duty", action="store_true", help="Enable 1-step duty autotune in eval")
     ap.add_argument(
         "--sim_workers",
         type=int,
@@ -2516,7 +2511,6 @@ def main() -> None:
             t_pre=float(args.t_pre),
             t_win=float(args.t_win),
             sim_timeout_s=float(args.sim_timeout_s),
-            autotune_duty=bool(args.autotune_duty),
             max_new_tokens=int(args.max_new_tokens),
             temperature=float(args.temperature),
             top_p=float(args.top_p),
@@ -2817,7 +2811,6 @@ def main() -> None:
                         t_pre=float(args.t_pre),
                         t_win=float(args.t_win),
                         sim_timeout_s=float(args.sim_timeout_s),
-                        autotune_duty=bool(args.autotune_duty),
                     )
                 else:
                     fut = sim_executor.submit(
@@ -2831,7 +2824,6 @@ def main() -> None:
                         t_pre=float(args.t_pre),
                         t_win=float(args.t_win),
                         sim_timeout_s=float(args.sim_timeout_s),
-                        autotune_duty=bool(args.autotune_duty),
                     )
                     fut_to_i[fut] = int(bi)
 
@@ -3012,7 +3004,6 @@ def main() -> None:
                 t_pre=float(args.t_pre),
                 t_win=float(args.t_win),
                 sim_timeout_s=float(args.sim_timeout_s),
-                autotune_duty=bool(args.autotune_duty),
                 max_new_tokens=int(args.max_new_tokens),
                 temperature=float(args.temperature),
                 top_p=float(args.top_p),
@@ -3111,7 +3102,6 @@ def main() -> None:
                         t_pre=float(args.t_pre),
                         t_win=float(args.t_win),
                         sim_timeout_s=float(args.sim_timeout_s),
-                        autotune_duty=bool(args.autotune_duty),
                         max_new_tokens=int(args.max_new_tokens),
                         temperature=float(args.temperature),
                         top_p=float(args.top_p),
@@ -3167,7 +3157,6 @@ def main() -> None:
                             t_pre=float(args.t_pre),
                             t_win=float(args.t_win),
                             sim_timeout_s=float(args.sim_timeout_s),
-                            autotune_duty=bool(args.autotune_duty),
                             max_new_tokens=int(args.max_new_tokens),
                             temperature=float(args.temperature),
                             top_p=float(args.top_p),
@@ -3366,7 +3355,6 @@ def main() -> None:
                                 t_pre=float(args.t_pre),
                                 t_win=float(args.t_win),
                                 sim_timeout_s=float(args.sim_timeout_s),
-                                autotune_duty=bool(args.autotune_duty),
                                 max_new_tokens=int(args.max_new_tokens),
                                 temperature=float(args.temperature),
                                 top_p=float(args.top_p),

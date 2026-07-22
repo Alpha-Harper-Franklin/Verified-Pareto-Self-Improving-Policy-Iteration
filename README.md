@@ -1,26 +1,26 @@
 # MO-SIMI Reproduction Package
 
-This repository accompanies **Verified Self-Improving Learning of Large Language Models for Multi-Objective Point-Spec Circuit Design**. It contains the code, LoRA adapters, task definitions, simulator interfaces, training logs, and evaluation artifacts used for the MO-SIMI experiments on:
+This repository accompanies **Verified Self-Improving Learning of Large Language Models for Multi-Objective Point-Spec Circuit Design**. It contains source snapshots, task definitions, simulator interfaces, training components, and runnable wrappers for MO-SIMI experiments on:
 
 - DC--DC converters: buck, boost, SEPIC, and buck--boost;
 - amplifier passive networks around predefined two-stage and RF active cores;
 - oscillator passive networks around predefined LC, RC, ring, and Wien active cores.
 
-The base Qwen2.5-7B model is not redistributed. Download it separately and pass its local path through `--base_model`. The amplifier and oscillator experiments do not synthesize complete active circuits from scratch.
+The base Qwen2.5-7B model and the archived LoRA checkpoints are not redistributed. Download the base model separately and pass local model and adapter paths to the wrappers. The amplifier and oscillator experiments do not synthesize complete active circuits from scratch.
 
 ## Repository layout
 
-Each circuit-family directory follows the same layout:
+The public source layout is:
 
 ```text
-dcdc|amplifier|oscillator/
-  1_eval_code/                 evaluation and SPICE-verification code
-  2_train_code/                SFT, PVPO, Safe-PPO, and pipeline code
-  3_eval_artifacts_latest/     archived evaluation outputs
-  4_train_artifacts_latest/    adapters, logs, data, and run configurations
+dcdc/code/                     DC--DC evaluation, recovery, and training code
+amplifier/code/                amplifier-family verifier and training code
+oscillator/code/               oscillator-family verifier and training code
+scripts/                       quick-start wrappers
+requirements.txt               Python dependency versions
 ```
 
-The files under `1_eval_code/` and `2_train_code/` intentionally include duplicate shared modules so that each directory can be used as a self-contained code snapshot. Archived `code_snapshot_*` directories preserve the implementation used by individual runs.
+Each family directory is a self-contained source snapshot and therefore contains some shared modules. Full training logs, generated candidates, and LoRA checkpoints are substantially larger than the source repository; the paper and Supplementary Information report the audited configurations and results.
 
 ## Prerequisites
 
@@ -48,20 +48,22 @@ NGSpice must be available on `PATH`. Training requires enough GPU memory for a 7
 
 ## Quick-start evaluation
 
-The repository includes executable wrappers under `scripts/`. To replay the final
+The repository includes executable wrappers under `scripts/`. To evaluate a
 DC--DC adapter, run:
 
 ```bash
-bash scripts/quickstart_eval_dcdc.sh /path/to/Qwen2.5-7B
+bash scripts/quickstart_eval_dcdc.sh \
+  /path/to/Qwen2.5-7B \
+  /path/to/final_adapter
 ```
 
-The following command evaluates the archived final DC--DC adapter with ten raw generations per task. Replace `/path/to/Qwen2.5-7B` with the local base-model directory.
+The equivalent direct command generates ten raw candidates per task. Replace both model paths with local directories.
 
 ```bash
-cd dcdc/1_eval_code
+cd dcdc/code
 python eval_dcdc_family.py \
   --base_model /path/to/Qwen2.5-7B \
-  --adapter ../4_train_artifacts_latest/vpspi_tol001_20260111_005147_PURE_SFT_ANCHOR_LOOP_r40_8GPU176CPU/round_02/safe_ppo/ppo_best \
+  --adapter /path/to/final_adapter \
   --outdir ./replay_final_raw \
   --n_per_task 10 \
   --max_new_tokens 320 \
@@ -74,7 +76,7 @@ python eval_dcdc_family.py \
   --no_fallback
 ```
 
-Use `eval_amp_family.py` and `eval_osc_family.py` in the corresponding family directories for amplifier and oscillator evaluation. Run any evaluator with `--help` to list family-specific options.
+Use `amplifier/code/eval_amp_family.py` and `oscillator/code/eval_osc_family.py` for amplifier and oscillator evaluation. Run any evaluator with `--help` to list family-specific options.
 
 ## Quick-start training
 
@@ -88,10 +90,10 @@ bash scripts/quickstart_train_dcdc.sh \
   /path/to/pvpo_sft.jsonl
 ```
 
-The DC--DC orchestration entry point is `dcdc/2_train_code/run_vpspi_pipeline.py`. A one-round example is:
+The DC--DC orchestration entry point is `dcdc/code/run_vpspi_pipeline.py`. A one-round example is:
 
 ```bash
-cd dcdc/2_train_code
+cd dcdc/code
 python run_vpspi_pipeline.py \
   --base_model /path/to/Qwen2.5-7B \
   --anchor_adapter /path/to/anchor_sft_adapter \
@@ -118,21 +120,11 @@ python run_vpspi_pipeline.py \
   --train_gpus 1
 ```
 
-The exact archived main-run command and all continuation commands are recorded in:
-
-```text
-dcdc/4_train_artifacts_latest/
-  vpspi_tol001_20260111_005147_PURE_SFT_ANCHOR_LOOP_r40_8GPU176CPU/
-    run_config.json
-    run_config_resume_*.json
-    logs/pipeline.log
-```
-
-Server-specific absolute paths in archived commands must be replaced with local paths. Set `--selfplay_sim_workers` and `--ppo_sim_workers` according to the effective CPU quota, not the host-wide logical CPU count.
+Set `--selfplay_sim_workers` and `--ppo_sim_workers` according to the effective CPU quota, not the host-wide logical CPU count. The archived main-run values and continuation accounting are reported in the Supplementary Information.
 
 ## Training stages and artifacts
 
-For each completed outer round, the pipeline records:
+For each completed outer round, the pipeline writes:
 
 1. candidate netlists and simulator measurements under `round_*/selfplay_data/`;
 2. preference pairs under `round_*/selfplay_data/dpo_pairs.jsonl`;
@@ -155,7 +147,7 @@ The numerical near-miss search used in strict replay edits only predeclared nume
 
 ## Reproducing paper tables
 
-Archived summary JSON files in `3_eval_artifacts_latest/` and per-round metric files in `4_train_artifacts_latest/` are the source records for the paper tables. Preserve task scope, tolerance, fallback setting, repair/search budget, and duplicate policy when comparing summaries. Results with different settings are not directly interchangeable.
+The paper tables are accompanied by task definitions, aggregate values, tolerance sweeps, and controlled-replay details in the Supplementary Information. Preserve task scope, tolerance, fallback setting, repair/search budget, and duplicate policy when comparing new runs with those values. Results with different settings are not directly interchangeable.
 
 ## License and citation
 

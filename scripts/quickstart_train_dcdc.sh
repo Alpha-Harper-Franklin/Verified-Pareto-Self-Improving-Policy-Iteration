@@ -10,9 +10,9 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 base_model="$1"
 anchor_adapter="$2"
 pvpo_sft_jsonl="$3"
-run_root="${4:-$repo_root/dcdc/2_train_code/runs}"
+run_root="${4:-$repo_root/dcdc/code/runs}"
 
-cd "$repo_root/dcdc/2_train_code"
+cd "$repo_root/dcdc/code"
 python run_vpspi_pipeline.py \
   --base_model "$base_model" \
   --anchor_adapter "$anchor_adapter" \

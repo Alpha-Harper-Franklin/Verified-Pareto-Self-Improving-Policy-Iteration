@@ -1,10 +1,13 @@
 # Core training stack used by the archived MO-SIMI code.
 torch==2.7.0
-transformers>=4.45,<4.49
+# TRL 0.9.6's legacy DPOTrainer is incompatible with the batch API added in
+# Transformers 4.46 (its get_batch_samples method has the older semantics).
+transformers==4.45.2
 accelerate>=1.0,<2.0
 datasets>=3.0,<4.0
 peft==0.13.2
-trl>=0.11,<0.13
+# train_ppo_dcdc.py uses TRL's legacy PPOTrainer.step/generate API.
+trl==0.9.6
 
 # Evaluation, numerical search, and utilities.
 numpy>=1.26,<2.3

@@ -14,6 +14,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+from dcdc_taskset import Task
+from task_manifest import ensure_disjoint, load_tasks_jsonl, sha256_file, task_key
+
 
 def _now() -> str:
     return time.strftime("%Y%m%d_%H%M%S")
@@ -254,10 +257,29 @@ def _run_selfplay_sharded(
         raise SystemExit("[selfplay_sharded] no GPUs visible (torch.cuda.device_count()==0)")
     n_shards = max(1, min(int(n_shards), int(gpus)))
 
+    # Preserve the parent's physical GPU assignment. Replacing a parent value
+    # such as CUDA_VISIBLE_DEVICES=2,3 with 0 or 1 would redirect concurrent
+    # seed workers onto physical GPUs 0 and 1.
+    parent_cvd = str(os.environ.get("CUDA_VISIBLE_DEVICES") or "").strip()
+    if parent_cvd:
+        visible_gpu_ids = [x.strip() for x in parent_cvd.split(",") if x.strip()]
+    else:
+        visible_gpu_ids = [str(i) for i in range(int(gpus))]
+    if len(visible_gpu_ids) < int(gpus):
+        raise SystemExit(
+            f"[selfplay_sharded] CUDA_VISIBLE_DEVICES exposes {visible_gpu_ids}, "
+            f"but torch reports {gpus} visible GPUs"
+        )
+
     cpu_budget = int(sim_workers_total) if int(sim_workers_total) > 0 else int(_cpu_quota())
     per_shard = int(max(1, int(cpu_budget) // int(n_shards)))
 
-    _append_text(log_path, f"[selfplay_sharded] ridx={ridx} shards={n_shards} gpus={gpus} cpu_budget={cpu_budget} sim_workers_per_shard={per_shard}\n")
+    _append_text(
+        log_path,
+        f"[selfplay_sharded] ridx={ridx} shards={n_shards} gpus={gpus} "
+        f"visible_gpu_ids={visible_gpu_ids} cpu_budget={cpu_budget} "
+        f"sim_workers_per_shard={per_shard}\n",
+    )
 
     procs: List[Tuple[int, subprocess.Popen, Path, Path]] = []
     for sid in range(int(n_shards)):
@@ -275,7 +297,7 @@ def _run_selfplay_sharded(
             cmd.append("--resume")
 
         env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = str(int(sid) % int(gpus))
+        env["CUDA_VISIBLE_DEVICES"] = visible_gpu_ids[int(sid) % len(visible_gpu_ids)]
         env.setdefault("TOKENIZERS_PARALLELISM", "false")
         env.setdefault("OMP_NUM_THREADS", "1")
         env.setdefault("MKL_NUM_THREADS", "1")
@@ -412,6 +434,7 @@ def _run_redline_eval(
     constrained: bool,
     autotune_duty: bool,
     log_path: Path,
+    tasks: List[Task] | None = None,
 ) -> Dict[str, Any]:
     outdir.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -448,7 +471,8 @@ def _run_redline_eval(
         cmd.append("--constrained")
     if bool(autotune_duty):
         cmd.append("--autotune_duty")
-    for fam, vin, vout in REDLINE_TASKS:
+    eval_tasks = [task_key(task) for task in tasks] if tasks else list(REDLINE_TASKS)
+    for fam, vin, vout in eval_tasks:
         cmd += ["--only_task", f"{fam},{vin},{vout}"]
     _run(cmd, cwd=code_dir, log_path=log_path)
 
@@ -473,6 +497,16 @@ def main() -> int:
     )
     ap.add_argument("--resume", action="store_true", help="Resume/append to an existing --outdir (reuses best_cv_guard.json if present).")
     ap.add_argument("--rounds", type=int, default=1, help="VP-SPI iterations (A→C→D). 0 means loop forever until killed.")
+    ap.add_argument(
+        "--train_tasks_jsonl",
+        default="",
+        help="Frozen training-task JSONL. Only these tasks may contribute candidates or parameter updates.",
+    )
+    ap.add_argument(
+        "--guard_tasks_jsonl",
+        default="",
+        help="Frozen validation-task JSONL used only for model acceptance and rollback.",
+    )
 
     # Global requirements
     ap.add_argument("--tol", type=float, default=0.01, help="Fixed CV tolerance (forced to 0.01).")
@@ -616,6 +650,20 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=2025)
     args = ap.parse_args()
 
+    train_manifest = str(args.train_tasks_jsonl or "").strip()
+    guard_manifest = str(args.guard_tasks_jsonl or "").strip()
+    if bool(train_manifest) != bool(guard_manifest):
+        raise SystemExit("--train_tasks_jsonl and --guard_tasks_jsonl must be provided together")
+    strict_split = bool(train_manifest and guard_manifest)
+    train_tasks = load_tasks_jsonl(train_manifest) if strict_split else []
+    guard_tasks = load_tasks_jsonl(guard_manifest) if strict_split else []
+    if strict_split:
+        ensure_disjoint(train_tasks, guard_tasks)
+        if len(train_tasks) != 69 or len(guard_tasks) != 8:
+            raise SystemExit(
+                f"strict revision protocol requires 69 train and 8 guard tasks; got {len(train_tasks)} and {len(guard_tasks)}"
+            )
+
     # Hard requirement: fixed tol=0.01 everywhere (self-play scoring, DPO filtering, PPO reward, eval).
     tol = 0.01
     if abs(float(args.tol) - tol) > 1e-12:
@@ -642,6 +690,21 @@ def main() -> int:
         log_path = outdir / "logs" / "pipeline.log"
         _append_text(log_path, f"[start] {run_name} ts={_now()} pid={os.getpid()}\n")
         _write_json(outdir / "run_config.json", {"argv": sys.argv, "tol_forced": tol})
+
+    _write_json(
+        outdir / "task_protocol.json",
+        {
+            "strict_split": bool(strict_split),
+            "train_tasks_jsonl": str(Path(train_manifest).resolve()) if train_manifest else "",
+            "train_tasks_sha256": sha256_file(train_manifest) if train_manifest else "",
+            "guard_tasks_jsonl": str(Path(guard_manifest).resolve()) if guard_manifest else "",
+            "guard_tasks_sha256": sha256_file(guard_manifest) if guard_manifest else "",
+            "n_train_tasks": int(len(train_tasks)) if strict_split else 77,
+            "n_guard_tasks": int(len(guard_tasks)) if strict_split else int(len(REDLINE_TASKS)),
+            "seed": int(args.seed),
+            "rounds": int(args.rounds),
+        },
+    )
 
     # (Resume-safe) load baseline non-regression guard if available; otherwise run anchor redline.
     best_guard_path = outdir / "best_cv_guard.json"
@@ -671,6 +734,7 @@ def main() -> int:
             constrained=bool(args.redline_constrained),
             autotune_duty=bool(args.redline_autotune_duty) and (not bool(args.redline_no_autotune_duty)),
             log_path=log_path,
+            tasks=guard_tasks if strict_split else None,
         )
         best_eval = {
             "cv_rate": float(anchor_eval["cv_rate"]),
@@ -777,6 +841,8 @@ def main() -> int:
             "--sft_strict_topn_per_task",
             str(int(args.selfplay_sft_strict_topn_per_task)),
         ]
+        if strict_split:
+            base_sp_cmd += ["--tasks_jsonl", str(Path(train_manifest).resolve())]
         if bool(args.selfplay_ensure_pass_cv):
             base_sp_cmd.append("--ensure_pass_cv")
             base_sp_cmd += ["--min_pass_cv", str(int(args.selfplay_min_pass_cv))]
@@ -872,6 +938,8 @@ def main() -> int:
                     str(warm_dir),
                     "--ddp_backend",
                     str(args.ddp_backend),
+                    "--seed",
+                    str(int(args.seed) + ridx * 1000 + 11),
                     "--lr",
                     str(float(args.selfplay_sft_warmup_lr)),
                     "--max_steps",
@@ -913,6 +981,7 @@ def main() -> int:
                         constrained=bool(args.redline_constrained),
                         autotune_duty=bool(args.redline_autotune_duty) and (not bool(args.redline_no_autotune_duty)),
                         log_path=log_path,
+                        tasks=guard_tasks if strict_split else None,
                     )
                     ok_warm, degraded = _non_regress(cand=warm_eval, best=best_eval)
                     _write_json(rdir / "selfplay_sft_warmup_gate.json", {"accepted": bool(ok_warm), "degraded": degraded, "cand": warm_eval, "best": best_eval})
@@ -941,6 +1010,8 @@ def main() -> int:
             str(dpo_dir),
             "--ddp_backend",
             str(args.ddp_backend),
+            "--seed",
+            str(int(args.seed) + ridx * 1000 + 21),
             "--lr",
             str(float(args.dpo_lr)),
             "--epochs",
@@ -986,6 +1057,8 @@ def main() -> int:
                 str(reg_dir),
                 "--ddp_backend",
                 str(args.ddp_backend),
+                "--seed",
+                str(int(args.seed) + ridx * 1000 + 31),
                 "--lr",
                 str(float(args.pvpo_sft_reg_lr)),
                 "--max_steps",
@@ -1032,6 +1105,7 @@ def main() -> int:
             constrained=bool(args.redline_constrained),
             autotune_duty=bool(args.redline_autotune_duty) and (not bool(args.redline_no_autotune_duty)),
             log_path=log_path,
+            tasks=guard_tasks if strict_split else None,
         )
         ok_dpo, degraded = _non_regress(cand=dpo_eval, best=best_eval)
         _write_json(rdir / "pvpo_gate.json", {"accepted": bool(ok_dpo), "degraded": degraded, "cand": dpo_eval, "best": best_eval})
@@ -1049,15 +1123,19 @@ def main() -> int:
         guard_tasks0 = int(args.ppo_guard_base_tasks)
         guard_budget0 = int(args.ppo_guard_base_total_samples)
         sched = str(args.ppo_guard_schedule)
-        if sched == "double_per_round":
-            guard_tasks = int(guard_tasks0) * (2 ** int(ridx))
+        if strict_split:
+            guard_task_count = int(len(guard_tasks))
+        elif sched == "double_per_round":
+            guard_task_count = int(guard_tasks0) * (2 ** int(ridx))
         elif sched == "add_per_round":
-            guard_tasks = int(guard_tasks0) + int(args.ppo_guard_add_step) * int(ridx)
+            guard_task_count = int(guard_tasks0) + int(args.ppo_guard_add_step) * int(ridx)
         else:
-            guard_tasks = int(guard_tasks0)
+            guard_task_count = int(guard_tasks0)
         # Keep total guard samples roughly proportional to guard_tasks (preserve n_per_task).
-        if int(guard_tasks0) > 0:
-            guard_budget = int((int(guard_budget0) * int(guard_tasks) + int(guard_tasks0) - 1) // int(guard_tasks0))
+        if strict_split:
+            guard_budget = int(guard_budget0)
+        elif int(guard_tasks0) > 0:
+            guard_budget = int((int(guard_budget0) * int(guard_task_count) + int(guard_tasks0) - 1) // int(guard_tasks0))
         else:
             guard_budget = int(guard_budget0)
         
@@ -1119,14 +1197,18 @@ def main() -> int:
             "--save_steps",
             str(int(args.ppo_save_steps)),
             "--cv_guard_init_tasks",
-            str(int(guard_tasks)),
+            str(int(guard_task_count)),
             "--cv_guard_tasks_max",
-            str(int(guard_tasks)),
+            str(int(guard_task_count)),
             "--cv_guard_total_samples",
             str(int(guard_budget)),
             "--cv_guard_expand_streak",
             "0",
         ]
+        if strict_split:
+            ppo_cmd += ["--train_tasks_jsonl", str(Path(train_manifest).resolve())]
+            ppo_cmd += ["--guard_tasks_jsonl", str(Path(guard_manifest).resolve())]
+            ppo_cmd += ["--hard_task_frac", "0"]
         if bool(args.ppo_constrained):
             ppo_cmd.append("--constrained")
         if bool(args.ppo_autotune_duty):
@@ -1178,6 +1260,7 @@ def main() -> int:
             constrained=bool(args.redline_constrained),
             autotune_duty=bool(args.redline_autotune_duty) and (not bool(args.redline_no_autotune_duty)),
             log_path=log_path,
+            tasks=guard_tasks if strict_split else None,
         )
         ok_ppo, degraded = _non_regress(cand=ppo_eval, best=best_eval)
         _write_json(rdir / "ppo_gate.json", {"accepted": bool(ok_ppo), "degraded": degraded, "cand": ppo_eval, "best": best_eval})
@@ -1188,6 +1271,22 @@ def main() -> int:
         else:
             cur_adapter = str(cur_after_pvpo)
 
+        accepted_snapshot = rdir / "accepted_adapter"
+        _snapshot_dir(Path(cur_adapter).resolve(), accepted_snapshot)
+        _write_json(
+            rdir / "stage_checkpoints.json",
+            {
+                "round": int(ridx),
+                "round_start": str((rdir / "adapter_start_snapshot").resolve()),
+                "pvpo_candidate": str(Path(pvpo_adapter).resolve()),
+                "pvpo_accepted": bool(ok_dpo),
+                "safe_ppo_pre": str(Path(cur_after_pvpo).resolve()),
+                "safe_ppo_post_candidate": str(ppo_best.resolve()),
+                "safe_ppo_accepted": bool(ok_ppo),
+                "accepted_adapter": str(accepted_snapshot.resolve()),
+            },
+        )
+        cur_adapter = str(accepted_snapshot.resolve())
         _write_json(rdir / "round_state.json", {"round": int(ridx), "cur_adapter": str(cur_adapter), "best_eval": best_eval})
 
         ridx += 1

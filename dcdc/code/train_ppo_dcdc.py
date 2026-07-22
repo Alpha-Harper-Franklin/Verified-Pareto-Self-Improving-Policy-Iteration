@@ -68,6 +68,7 @@ from dcdc_eval_tran import eval_one_detail_dcdc
 from dcdc_taskset import Task, default_taskset
 from dcdc_verifier import verify_inc_dcdc
 from inc_parser import extract_inc_lines
+from task_manifest import ensure_disjoint, load_tasks_jsonl, sha256_file, task_key
 
 
 def _now() -> str:
@@ -564,7 +565,7 @@ def _snapshot_run_code(outdir: Path) -> None:
             p = code_dir / name
             if p.exists():
                 shutil.copy2(p, snap / name)
-        extra = Path('/root/autodl-tmp/workspace_autocircuit_rl/integrated/constraints.py')
+        extra = code_dir / 'integrated' / 'constraints.py'
         if extra.exists():
             shutil.copy2(extra, snap / 'integrated_constraints.py')
     except Exception as e:
@@ -761,6 +762,9 @@ def _guard_eval(
     if int(n_per_task) <= 0:
         n_per_task = 1
 
+    python_rng_state = random.getstate()
+    torch_rng_state = torch.random.get_rng_state()
+    cuda_rng_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
     random.seed(int(seed))
     torch.manual_seed(int(seed))
     if torch.cuda.is_available():
@@ -876,6 +880,11 @@ def _guard_eval(
         pass
     if was_train:
         trainer.model.train()
+
+    random.setstate(python_rng_state)
+    torch.random.set_rng_state(torch_rng_state)
+    if torch.cuda.is_available() and cuda_rng_states:
+        torch.cuda.set_rng_state_all(cuda_rng_states)
 
     by_family_cv = {fam: _cv_rate(fs) for fam, fs in per_family_cv.items()}
     by_family_ce = {fam: _cv_rate(fs) for fam, fs in per_family_ce.items()}
@@ -1632,6 +1641,16 @@ def main() -> None:
         default="all",
         help="Task pool used to sample PPO rollouts. 'guard' restricts rollouts to the current guard pool (stabilizes CV and speeds up improving best_guard CV).",
     )
+    ap.add_argument(
+        "--train_tasks_jsonl",
+        default="",
+        help="Optional frozen training-task manifest. These are the only tasks allowed in PPO rollouts.",
+    )
+    ap.add_argument(
+        "--guard_tasks_jsonl",
+        default="",
+        help="Optional frozen validation-task manifest. These tasks are used only for acceptance checks.",
+    )
     ap.add_argument("--min_elems", type=int, default=20)
     ap.add_argument("--t_pre", type=float, default=0.008)
     ap.add_argument("--t_win", type=float, default=0.002)
@@ -1859,20 +1878,31 @@ def main() -> None:
     if _is_main_process():
         _snapshot_run_code(outdir)
 
-    random.seed(int(args.seed))
-    torch.manual_seed(int(args.seed))
+    runtime_rank, runtime_world = _dist_rank_world()
+    process_seed = int(args.seed) + int(runtime_rank) * 1_000_003
+    random.seed(int(process_seed))
+    torch.manual_seed(int(process_seed))
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(int(args.seed))
+        torch.cuda.manual_seed_all(int(process_seed))
 
     # Prompt builder shared with eval.
     from eval_dcdc_family import build_prompt
 
-    tasks = default_taskset()
-    if not tasks:
+    train_manifest = str(getattr(args, "train_tasks_jsonl", "") or "").strip()
+    guard_manifest = str(getattr(args, "guard_tasks_jsonl", "") or "").strip()
+    if bool(train_manifest) != bool(guard_manifest):
+        raise SystemExit("--train_tasks_jsonl and --guard_tasks_jsonl must be provided together")
+    strict_split = bool(train_manifest and guard_manifest)
+    training_tasks = load_tasks_jsonl(train_manifest) if train_manifest else default_taskset()
+    validation_tasks = load_tasks_jsonl(guard_manifest) if guard_manifest else []
+    if strict_split:
+        ensure_disjoint(training_tasks, validation_tasks)
+    tasks = list(training_tasks) + list(validation_tasks)
+    if not training_tasks:
         raise SystemExit("no tasks")
     # Pre-shuffle per-family task lists for deterministic but balanced coverage.
     fam_to_tasks: Dict[str, List[Task]] = {}
-    for t in tasks:
+    for t in training_tasks:
         fam_to_tasks.setdefault(str(t.family), []).append(t)
     for fam in list(fam_to_tasks.keys()):
         random.shuffle(fam_to_tasks[fam])
@@ -1884,14 +1914,39 @@ def main() -> None:
 
     cv_guard_enabled = not bool(getattr(args, "no_cv_guard", False))
     guard_max = int(getattr(args, "cv_guard_tasks_max", 0) or 0)
-    if guard_max <= 0:
-        # No cap: allow guard pool to expand to the full taskset (user requirement).
-        guard_max = int(len(tasks))
-    guard_pool = _guard_pool_from_taskset(tasks_all=tasks, max_tasks=int(guard_max))
-    if not guard_pool:
-        guard_pool = list(_guard_tasks_default())
-    core_guard = list(_guard_tasks_default())
+    if strict_split:
+        guard_pool = [task_key(task) for task in validation_tasks]
+        core_guard = list(guard_pool)
+        guard_max = int(len(guard_pool))
+    else:
+        if guard_max <= 0:
+            # No cap: allow guard pool to expand to the full taskset (user requirement).
+            guard_max = int(len(tasks))
+        guard_pool = _guard_pool_from_taskset(tasks_all=tasks, max_tasks=int(guard_max))
+        if not guard_pool:
+            guard_pool = list(_guard_tasks_default())
+        core_guard = list(_guard_tasks_default())
     core_guard_keys = [(str(f).strip().lower(), float(vin), float(vout)) for (f, vin, vout) in core_guard]
+    if _is_main_process():
+        _write_json(
+            outdir / "task_protocol.json",
+            {
+                "strict_split": bool(strict_split),
+                "train_tasks_jsonl": str(Path(train_manifest).resolve()) if train_manifest else "",
+                "train_tasks_sha256": sha256_file(train_manifest) if train_manifest else "",
+                "guard_tasks_jsonl": str(Path(guard_manifest).resolve()) if guard_manifest else "",
+                "guard_tasks_sha256": sha256_file(guard_manifest) if guard_manifest else "",
+                "n_train_tasks": int(len(training_tasks)),
+                "n_guard_tasks": int(len(validation_tasks)) if strict_split else int(len(guard_pool)),
+                "base_seed": int(args.seed),
+                "world_size": int(runtime_world),
+                "rank_seed_rule": "base_seed + rank * 1000003",
+            },
+        )
+    print(
+        f"[seed] base={int(args.seed)} rank={int(runtime_rank)}/{int(runtime_world)} process_seed={int(process_seed)}",
+        flush=True,
+    )
     guard_init_tasks = int(getattr(args, "cv_guard_init_tasks", 0) or 0)
     if int(guard_init_tasks) > 0:
         guard_n_tasks = min(int(len(guard_pool)), int(guard_init_tasks))
@@ -1903,6 +1958,9 @@ def main() -> None:
     guard_expand_streak = int(getattr(args, "cv_guard_expand_streak", 0) or 0)
 
     hard_task_frac = float(getattr(args, "hard_task_frac", 0.0) or 0.0)
+    if strict_split and hard_task_frac > 0.0:
+        print("[task] strict split: disable guard-derived hard-task sampling to prevent validation leakage", flush=True)
+        hard_task_frac = 0.0
     hard_pass_rate_lt = float(getattr(args, "hard_task_pass_rate_lt", 1.0) or 1.0)
     hard_tasks: List[Task] = []
     hard_fam_to_tasks: Dict[str, List[Task]] = {}
@@ -2099,10 +2157,12 @@ def main() -> None:
         cursors = {fam: 0 for fam in fam_map}
         return lst, fam_map, cursors
 
-    tasks_train: List[Task] = list(tasks)
+    tasks_train: List[Task] = list(training_tasks)
     fam_to_tasks_train: Dict[str, List[Task]] = dict(fam_to_tasks)
     fam_cursors_train: Dict[str, int] = dict(fam_cursors)
     train_guard_n_tasks: Optional[int] = None
+    if strict_split and train_task_pool == "guard":
+        raise SystemExit("--train_task_pool guard is forbidden with separate train/guard manifests")
     if train_task_pool == "guard":
         tasks_train, fam_to_tasks_train, fam_cursors_train = _build_guard_train_pool(int(guard_n_tasks))
         train_guard_n_tasks = int(guard_n_tasks)
@@ -2147,7 +2207,7 @@ def main() -> None:
 
 
     ppo_cfg = PPOConfig(
-        seed=int(args.seed),
+        seed=int(process_seed),
         steps=int(args.steps),
         learning_rate=float(args.lr),
         batch_size=int(args.batch_size),

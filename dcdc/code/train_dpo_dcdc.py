@@ -140,6 +140,7 @@ def main() -> None:
     ap.add_argument("--max_steps", type=int, default=0, help="0 means use --epochs")
     ap.add_argument("--save_steps", type=int, default=100)
     ap.add_argument("--save_total_limit", type=int, default=3)
+    ap.add_argument("--seed", type=int, default=2025)
     ap.add_argument("--resume", action="store_true", help="Resume from the latest checkpoint in --outdir if present")
     ap.add_argument("--ddp_backend", default="nccl", help="DDP backend when launched multi-process (e.g., via accelerate/torchrun). Use gloo if NCCL is unstable.")
     args = ap.parse_args()
@@ -166,6 +167,14 @@ def main() -> None:
     )
     model = PeftModel.from_pretrained(model, args.sft_adapter, is_trainable=True)
     model.config.use_cache = False
+    try:
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    except TypeError:
+        model.gradient_checkpointing_enable()
+    try:
+        model.enable_input_require_grads()
+    except Exception:
+        pass
 
     train_args = DPOConfig(
         output_dir=args.outdir,
@@ -186,6 +195,10 @@ def main() -> None:
         ddp_backend=str(args.ddp_backend).strip() or None,
         ddp_find_unused_parameters=False,
         ddp_broadcast_buffers=False,
+        seed=int(args.seed),
+        data_seed=int(args.seed),
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
     )
 
     trainer = DPOTrainer(

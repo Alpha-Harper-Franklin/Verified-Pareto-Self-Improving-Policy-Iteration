@@ -149,6 +149,7 @@ def main() -> None:
     ap.add_argument("--max_rows", type=int, default=0, help="0 means use all rows")
     ap.add_argument("--save_steps", type=int, default=200)
     ap.add_argument("--save_total_limit", type=int, default=3)
+    ap.add_argument("--seed", type=int, default=2025)
     ap.add_argument("--resume", action="store_true", help="Resume from the latest checkpoint in --outdir if present")
     ap.add_argument("--ddp_backend", default="nccl", help="DDP backend when launched multi-process (e.g., via accelerate/torchrun). Use gloo if NCCL is unstable.")
     args = ap.parse_args()
@@ -187,11 +188,20 @@ def main() -> None:
         trust_remote_code=True,
         torch_dtype=torch.bfloat16,
     )
-    model = get_peft_model(model, lora)
     init_adapter = str(args.init_adapter or "").strip()
     if init_adapter:
         model = PeftModel.from_pretrained(model, init_adapter, is_trainable=True)
+    else:
+        model = get_peft_model(model, lora)
     model.config.use_cache = False
+    try:
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    except TypeError:
+        model.gradient_checkpointing_enable()
+    try:
+        model.enable_input_require_grads()
+    except Exception:
+        pass
 
     train_args = TrainingArguments(
         output_dir=str(outdir),
@@ -212,6 +222,10 @@ def main() -> None:
         ddp_backend=str(args.ddp_backend).strip() or None,
         ddp_find_unused_parameters=False,
         ddp_broadcast_buffers=False,
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        seed=int(args.seed),
+        data_seed=int(args.seed),
     )
 
     collator = DataCollatorForLanguageModeling(tok, mlm=False)

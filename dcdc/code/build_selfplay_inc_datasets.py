@@ -18,6 +18,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from dcdc_taskset import Task, default_taskset
+from task_manifest import load_tasks_jsonl, sha256_file
 from dcdc_verifier import verify_inc_dcdc
 from inc_parser import extract_inc_lines, parse_inc
 from repair_corrector import RepairCorrector, build_feature_vector
@@ -973,6 +974,11 @@ def main() -> int:
         help="Allow 'chosen' samples that do NOT pass CV (not recommended for PVPO/DPO). Default requires pass_CV chosen.",
     )
     ap.add_argument("--max_tasks", type=int, default=0, help="0 means all tasks")
+    ap.add_argument(
+        "--tasks_jsonl",
+        default="",
+        help="Optional frozen JSONL task manifest. When set, only these tasks can generate candidates or training data.",
+    )
     ap.add_argument("--task_shard_id", type=int, default=0, help="Task shard id in [0, --task_shard_count).")
     ap.add_argument("--task_shard_count", type=int, default=1, help="Total task shards. 1 disables sharding.")
     ap.add_argument(
@@ -1046,12 +1052,6 @@ def main() -> int:
     shard_id = int(getattr(args, "task_shard_id", 0) or 0)
     if shard_id < 0 or shard_id >= shard_count:
         raise SystemExit(f"--task_shard_id must be in [0,{shard_count}), got {shard_id}")
-
-    # CA800 default: if a seed repair-corrector checkpoint exists, use it automatically.
-    if not str(getattr(args, "repair_corrector", "") or "").strip():
-        seed_ckpt = Path("/root/autodl-tmp/dcdc_family/data/repair_corrector_seed_ca800_trained/model.pt")
-        if seed_ckpt.exists():
-            args.repair_corrector = str(seed_ckpt)
 
     out_root = Path(args.out_root)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -1174,7 +1174,8 @@ def main() -> int:
         else:
             print(f"[repair-corrector] not found: {p}")
 
-    tasks = default_taskset()
+    tasks_manifest = str(getattr(args, "tasks_jsonl", "") or "").strip()
+    tasks = load_tasks_jsonl(tasks_manifest) if tasks_manifest else default_taskset()
     if int(args.max_tasks) > 0:
         tasks = tasks[: int(args.max_tasks)]
 
@@ -1843,6 +1844,8 @@ def main() -> int:
             "adapter": str(args.adapter),
             "out_root": str(out_root),
             "tasks_total": len(tasks),
+            "tasks_jsonl": str(Path(tasks_manifest).resolve()) if tasks_manifest else "",
+            "tasks_jsonl_sha256": sha256_file(tasks_manifest) if tasks_manifest else "",
             "tasks_done": int(total_tasks_done),
             "tasks_skipped": int(total_tasks_skipped),
             "pairs_total": int(total_pairs),

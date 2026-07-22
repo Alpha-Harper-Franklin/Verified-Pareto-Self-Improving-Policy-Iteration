@@ -34,6 +34,8 @@ The reported training run used:
 - Qwen2.5-7B as the base model;
 - CUDA GPUs for SFT/PVPO/Safe-PPO and CPU workers for SPICE verification.
 
+The archived training pipeline used ngspice 36. The controlled CPU replay reported in the revised manuscript uses NGSpice 46; simulator version, verifier settings, task scope, and tolerance must be held fixed when reproducing or comparing those replay rows.
+
 Install the Python dependencies in an isolated environment:
 
 ```bash
